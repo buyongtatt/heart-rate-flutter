@@ -9,66 +9,85 @@ class ExcelExportService {
 
   ExcelExportService._init();
 
-  Map<DateTime, Map<String, BloodPressureRecord?>> _groupByDayAndPeriod(
+  /// Groups records by day and period (morning, afternoon, Night).
+  /// Returns a map: date -> { period -> List<BloodPressureRecord> }
+  Map<DateTime, Map<String, List<BloodPressureRecord>>> _groupByDayAndPeriod(
       List<BloodPressureRecord> records) {
-    final grouped = <DateTime, Map<String, BloodPressureRecord?>>{};
+    final grouped = <DateTime, Map<String, List<BloodPressureRecord>>>{};
 
     for (final record in records) {
       final ts = record.timestamp;
+      // Determine the reporting date (records before 5am belong to previous day)
       DateTime reportDate = DateTime(ts.year, ts.month, ts.day);
       if (ts.hour < 5) {
         reportDate = reportDate.subtract(const Duration(days: 1));
       }
-      final dateOnly = DateTime(reportDate.year, reportDate.month, reportDate.day);
+      final dateOnly =
+          DateTime(reportDate.year, reportDate.month, reportDate.day);
 
+      // Determine period
       String period;
       if (ts.hour >= 5 && ts.hour < 12) {
-        period = 'morning';
+        period = 'Morning';
       } else if (ts.hour >= 12 && ts.hour < 18) {
-        period = 'afternoon';
+        period = 'Afternoon';
       } else {
-        period = 'night';
+        period = 'Night'; // was 'night' before
       }
 
       grouped.putIfAbsent(dateOnly, () => {});
-      if (!grouped[dateOnly]!.containsKey(period)) {
-        grouped[dateOnly]![period] = record;
-      }
+      grouped[dateOnly]!.putIfAbsent(period, () => []);
+      grouped[dateOnly]![period]!.add(record);
     }
     return grouped;
   }
 
+  /// Exports all records to Excel with an additional 'Period' column.
   Future<String> exportToExcel(List<BloodPressureRecord> records) async {
     final excel = Excel.createExcel();
-  final sheet = excel['Blood Pressure Records'];
+    final sheet = excel['Blood Pressure Records'];
 
-  // Header
-  sheet.appendRow([
-    TextCellValue('Date'),
-    TextCellValue('Time'),
-    TextCellValue('Systolic'),
-    TextCellValue('Diastolic'),
-    TextCellValue('Heart Rate'),
-    TextCellValue('Category'),
-    TextCellValue('Notes'),
-  ]);
-
-  // Sort by timestamp
-  final sorted = List<BloodPressureRecord>.from(records)..sort((a,b) => a.timestamp.compareTo(b.timestamp));
-
-  for (final record in sorted) {
+    // Header with Period
     sheet.appendRow([
-      TextCellValue(DateFormat('yyyy-MM-dd').format(record.timestamp)),
-      TextCellValue(DateFormat('HH:mm').format(record.timestamp)),
-      IntCellValue(record.systolic),
-      IntCellValue(record.diastolic),
-      IntCellValue(record.heartRate),
-      TextCellValue(record.category),
-      TextCellValue(record.notes ?? ''),
+      TextCellValue('Date'),
+      TextCellValue('Period'),
+      TextCellValue('Time'),
+      TextCellValue('Systolic (mmHg)'),
+      TextCellValue('Diastolic (mmHg)'),
+      TextCellValue('Heart Rate (bpm)'),
+      TextCellValue('Category'),
+      TextCellValue('Notes'),
     ]);
-  }
 
-    for (var i = 0; i < 16; i++) {
+    // Sort by timestamp
+    final sorted = List<BloodPressureRecord>.from(records)
+      ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+
+    for (final record in sorted) {
+      final ts = record.timestamp;
+      String period;
+      if (ts.hour >= 5 && ts.hour < 12) {
+        period = 'Morning';
+      } else if (ts.hour >= 12 && ts.hour < 18) {
+        period = 'Afternoon';
+      } else {
+        period = 'Night';
+      }
+
+      sheet.appendRow([
+        TextCellValue(DateFormat('yyyy-MM-dd').format(ts)),
+        TextCellValue(period),
+        TextCellValue(DateFormat('HH:mm').format(ts)),
+        IntCellValue(record.systolic),
+        IntCellValue(record.diastolic),
+        IntCellValue(record.heartRate),
+        TextCellValue(record.category),
+        TextCellValue(record.notes ?? ''),
+      ]);
+    }
+
+    // Set column widths
+    for (var i = 0; i < 8; i++) {
       sheet.setColumnWidth(i, 20);
     }
 
@@ -81,43 +100,43 @@ class ExcelExportService {
     return filePath;
   }
 
+  /// Exports all records to CSV, grouped by day and period, but without losing any record.
   Future<String> exportToCsv(List<BloodPressureRecord> records) async {
     final grouped = _groupByDayAndPeriod(records);
     final buffer = StringBuffer();
 
+    // Header
     buffer.writeln(
-      'Date,Morning Systolic,Morning Diastolic,Morning Heart Rate,Morning Category,Morning Notes,'
-      'Afternoon Systolic,Afternoon Diastolic,Afternoon Heart Rate,Afternoon Category,Afternoon Notes,'
-      'Night Systolic,Night Diastolic,Night Heart Rate,Night Category,Night Notes',
-    );
+        'Date,Period,Time,Systolic (mmHg),Diastolic (mmHg),Heart Rate (bpm),Category,Notes');
 
+    // Sort dates and periods
     final sortedDates = grouped.keys.toList()..sort();
+    final periodOrder = {'Morning': 0, 'Afternoon': 1, 'Night': 2};
 
     for (final date in sortedDates) {
       final dayRecords = grouped[date]!;
-      final morning = dayRecords['morning'];
-      final afternoon = dayRecords['afternoon'];
-      final night = dayRecords['night'];
+      // Sort periods by Morning → Afternoon → Night
+      final sortedPeriods = dayRecords.keys.toList()
+        ..sort((a, b) => periodOrder[a]!.compareTo(periodOrder[b]!));
 
-      final row = [
-        DateFormat('yyyy-MM-dd').format(date),
-        morning?.systolic.toString() ?? '',
-        morning?.diastolic.toString() ?? '',
-        morning?.heartRate.toString() ?? '',
-        morning?.category ?? '',
-        morning?.notes ?? '',
-        afternoon?.systolic.toString() ?? '',
-        afternoon?.diastolic.toString() ?? '',
-        afternoon?.heartRate.toString() ?? '',
-        afternoon?.category ?? '',
-        afternoon?.notes ?? '',
-        night?.systolic.toString() ?? '',
-        night?.diastolic.toString() ?? '',
-        night?.heartRate.toString() ?? '',
-        night?.category ?? '',
-        night?.notes ?? '',
-      ];
-      buffer.writeln(row.join(','));
+      for (final period in sortedPeriods) {
+        final recordsInPeriod = dayRecords[period]!;
+        // Sort records by time
+        recordsInPeriod.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+
+        for (final record in recordsInPeriod) {
+          buffer.writeln(
+            '${DateFormat('yyyy-MM-dd').format(date)},'
+            '$period,'
+            '${DateFormat('HH:mm').format(record.timestamp)},'
+            '${record.systolic},'
+            '${record.diastolic},'
+            '${record.heartRate},'
+            '${record.category},'
+            '${record.notes ?? ''}',
+          );
+        }
+      }
     }
 
     final directory = await getApplicationDocumentsDirectory();
